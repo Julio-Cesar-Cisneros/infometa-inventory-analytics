@@ -15,6 +15,10 @@ st.set_page_config(
 
 st.title("📦 Panel de Reposición - Info Meta")
 
+st.caption(
+    "Análisis de ventas, stock y apoyo a decisiones de reposición."
+)
+
 if not DATA_FILE.exists():
     st.error(
         "No se encontró el archivo local de datos. "
