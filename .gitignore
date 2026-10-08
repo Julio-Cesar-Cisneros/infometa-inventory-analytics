@@ -218,3 +218,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# Datos privados de Info Meta
+Base_Limpia_Inventario_InfoMeta.xlsx
+*Copia de INVENTARIO*.xlsx
+data/private/
