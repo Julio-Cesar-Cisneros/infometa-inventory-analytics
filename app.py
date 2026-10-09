@@ -1,4 +1,7 @@
 from pathlib import Path
+from datetime import date
+from calendar import monthrange
+import math
 import re
 
 import pandas as pd
@@ -6,7 +9,7 @@ import streamlit as st
 
 
 # ==================================================
-# CONFIGURACIÓN
+# CONFIGURACIÓN GENERAL
 # ==================================================
 
 DATA_FILE = Path("Base_Limpia_Inventario_InfoMeta.xlsx")
@@ -19,6 +22,7 @@ st.set_page_config(
 )
 
 st.title("📦 Info Meta - Análisis de Inventario")
+
 st.caption(
     "Análisis de ventas, stock y apoyo a decisiones de reposición."
 )
@@ -44,7 +48,11 @@ def normalizar_producto(nombre):
     return nombre
 
 
-def calcular_estado(promedio, stock, cobertura):
+def calcular_estado_general(
+    promedio,
+    stock,
+    cobertura
+):
 
     if promedio <= 0:
         return "⚪ SIN VENTAS REGISTRADAS"
@@ -61,8 +69,26 @@ def calcular_estado(promedio, stock, cobertura):
     return "🟢 STOCK SUFICIENTE"
 
 
+def clasificar_demanda(
+    promedio,
+    umbral_alta,
+    umbral_media
+):
+
+    if promedio <= 0:
+        return "⚪ SIN MOVIMIENTO"
+
+    if promedio >= umbral_alta:
+        return "🔥 ALTA DEMANDA"
+
+    if promedio >= umbral_media:
+        return "📦 DEMANDA MEDIA"
+
+    return "🐢 BAJA DEMANDA"
+
+
 # ==================================================
-# CARGA DEL EXCEL
+# CARGA DE DATOS
 # ==================================================
 
 if not DATA_FILE.exists():
@@ -126,17 +152,13 @@ df["Producto_Analitico"] = (
 
 
 # ==================================================
-# SOLO INVENTARIO PROPIO
+# SOLO STOCK PROPIO
 # ==================================================
 
 df_propio = df[
     df["Tipo_Stock"] == "PROPIO"
 ].copy()
 
-
-# ==================================================
-# ÚLTIMO MES DISPONIBLE
-# ==================================================
 
 ultimo_mes = (
     df_propio["Mes_Fecha"]
@@ -150,18 +172,112 @@ datos_actuales = df_propio[
 
 
 # ==================================================
-# CREAR RESUMEN
+# PARÁMETROS DE LA TIENDA
+# ==================================================
+
+st.sidebar.divider()
+
+st.sidebar.subheader(
+    "⚙️ Política de reposición"
+)
+
+
+umbral_alta = st.sidebar.number_input(
+    "Alta demanda desde (unidades/mes)",
+    min_value=1.0,
+    value=6.0,
+    step=1.0,
+)
+
+
+umbral_media = st.sidebar.number_input(
+    "Demanda media desde (unidades/mes)",
+    min_value=0.1,
+    value=2.0,
+    step=0.5,
+)
+
+
+stock_minimo_alta = st.sidebar.number_input(
+    "Stock mínimo en alta demanda",
+    min_value=0,
+    value=2,
+    step=1,
+)
+
+
+dias_alerta = st.sidebar.number_input(
+    "Avisar si alcanza el mínimo en",
+    min_value=1,
+    value=7,
+    step=1,
+)
+
+
+incluir_mes_siguiente = st.sidebar.checkbox(
+    "Si hay presupuesto, cubrir también el próximo mes",
+    value=False,
+)
+
+
+# ==================================================
+# FECHA DE CORTE
+# ==================================================
+
+hoy = date.today()
+
+anio_inventario = int(
+    ultimo_mes.year
+)
+
+mes_inventario = int(
+    ultimo_mes.month
+)
+
+dias_mes = monthrange(
+    anio_inventario,
+    mes_inventario
+)[1]
+
+
+if (
+    hoy.year == anio_inventario
+    and hoy.month == mes_inventario
+):
+
+    dia_default = hoy.day
+
+else:
+
+    dia_default = dias_mes
+
+
+dia_corte = st.sidebar.number_input(
+    "Día hasta el que está actualizado el inventario",
+    min_value=1,
+    max_value=dias_mes,
+    value=dia_default,
+    step=1,
+)
+
+
+dias_restantes = max(
+    dias_mes - dia_corte,
+    0
+)
+
+
+# ==================================================
+# RESUMEN GENERAL
 # ==================================================
 
 def crear_resumen(
-    datos_historicos,
-    datos_mes_actual
+    historico,
+    actual
 ):
 
-    # INVENTARIO ACTUAL
-
-    actual = (
-        datos_mes_actual
+    inventario = (
+        actual
         .groupby("Producto_Analitico")
         .agg(
             Producto=("Producto", "last"),
@@ -175,10 +291,8 @@ def crear_resumen(
     )
 
 
-    # HISTÓRICO DE VENTAS
-
     ventas = (
-        datos_historicos
+        historico
         .groupby("Producto_Analitico")
         .agg(
             Ventas_Totales=("Vendido_Mes", "sum"),
@@ -188,9 +302,7 @@ def crear_resumen(
     )
 
 
-    # UNIÓN
-
-    resumen = actual.merge(
+    resumen = inventario.merge(
         ventas,
         on="Producto_Analitico",
         how="left"
@@ -209,15 +321,11 @@ def crear_resumen(
     )
 
 
-    # PROMEDIO MENSUAL
-
     resumen["Promedio_Mensual"] = (
         resumen["Ventas_Totales"]
         / resumen["Meses_Con_Datos"]
     )
 
-
-    # COBERTURA
 
     resumen["Cobertura_Meses"] = (
         resumen["Stock_Actual"]
@@ -231,10 +339,8 @@ def crear_resumen(
     ] = None
 
 
-    # ESTADO
-
     resumen["Estado"] = resumen.apply(
-        lambda fila: calcular_estado(
+        lambda fila: calcular_estado_general(
             fila["Promedio_Mensual"],
             fila["Stock_Actual"],
             fila["Cobertura_Meses"],
@@ -242,8 +348,6 @@ def crear_resumen(
         axis=1
     )
 
-
-    # PRIORIDAD
 
     prioridad = {
 
@@ -303,15 +407,6 @@ if vista == "📊 Resumen general":
         "📊 Situación general del inventario"
     )
 
-    st.caption(
-        "Se analizan únicamente productos propios "
-        "que siguen registrados en el último inventario."
-    )
-
-
-    # ==================================================
-    # EXPLICACIÓN
-    # ==================================================
 
     with st.expander(
         "ℹ️ ¿Qué significa cada estado?"
@@ -320,33 +415,24 @@ if vista == "📊 Resumen general":
         st.markdown(
             """
 **🔴 Agotado con ventas**  
-El producto tiene stock 0, pero registró ventas durante el periodo analizado.
+Stock actual igual a cero, pero existen ventas registradas.
 
 **🟠 Stock bajo**  
-Todavía queda producto, pero al ritmo promedio actual el stock alcanzaría para menos de 1,5 meses.
+La cobertura estimada es menor a 1,5 meses.
 
 **🟡 Vigilar**  
-El producto tiene aproximadamente entre 1,5 y 3 meses de cobertura.
+La cobertura está aproximadamente entre 1,5 y 3 meses.
 
 **🟢 Stock suficiente**  
-El inventario actual cubre más de 3 meses al ritmo promedio registrado.
+La cobertura supera los 3 meses.
 
 **⚪ Sin ventas registradas**  
-El producto está actualmente en inventario, pero no registró ventas durante los meses disponibles.
+El producto está en el inventario actual, pero no registró ventas en el periodo analizado.
 
----
-
-**Cobertura = Stock actual ÷ Venta promedio mensual**
-
-Estos estados son indicadores de apoyo.  
-La decisión final también puede depender del precio, proveedor, mercado, competencia y estrategia de la tienda.
+La decisión final de compra también depende del precio, proveedor, presupuesto y estrategia comercial.
 """
         )
 
-
-    # ==================================================
-    # CONTADORES
-    # ==================================================
 
     agotados = (
         resumen["Estado"]
@@ -378,9 +464,7 @@ La decisión final también puede depender del precio, proveedor, mercado, compe
     ).sum()
 
 
-    c1, c2, c3, c4, c5 = (
-        st.columns(5)
-    )
+    c1, c2, c3, c4, c5 = st.columns(5)
 
 
     c1.metric(
@@ -416,18 +500,12 @@ La decisión final también puede depender del precio, proveedor, mercado, compe
     st.divider()
 
 
-    # ==================================================
-    # PRODUCTOS QUE REQUIEREN ATENCIÓN
-    # ==================================================
+    # ----------------------------------------------
+    # REQUIEREN ATENCIÓN
+    # ----------------------------------------------
 
     st.subheader(
         "🚨 Productos que requieren atención"
-    )
-
-
-    st.caption(
-        "Aquí aparecen agotados, productos con stock bajo "
-        "y productos que conviene vigilar."
     )
 
 
@@ -460,17 +538,12 @@ La decisión final también puede depender del precio, proveedor, mercado, compe
     st.divider()
 
 
-    # ==================================================
+    # ----------------------------------------------
     # MAYOR ROTACIÓN
-    # ==================================================
+    # ----------------------------------------------
 
     st.subheader(
         "🔥 Productos con mayor rotación"
-    )
-
-
-    st.caption(
-        "Productos con mayor promedio de unidades vendidas por mes."
     )
 
 
@@ -514,70 +587,12 @@ La decisión final también puede depender del precio, proveedor, mercado, compe
     st.divider()
 
 
-    # ==================================================
-    # STOCK SUFICIENTE
-    # ==================================================
-
-    st.subheader(
-        "🟢 Productos con stock suficiente"
-    )
-
-
-    st.caption(
-        "Productos cuya cobertura estimada supera los 3 meses."
-    )
-
-
-    stock_ok = resumen[
-        resumen["Estado"]
-        == "🟢 STOCK SUFICIENTE"
-    ].copy()
-
-
-    stock_ok = (
-        stock_ok
-        .sort_values(
-            "Cobertura_Meses",
-            ascending=False
-        )
-    )
-
-
-    st.dataframe(
-
-        stock_ok[
-            [
-                "Producto",
-                "Categoria",
-                "Marca",
-                "Stock_Actual",
-                "Promedio_Mensual",
-                "Cobertura_Meses",
-            ]
-        ].round(2),
-
-        use_container_width=True,
-
-        hide_index=True,
-
-    )
-
-
-    st.divider()
-
-
-    # ==================================================
+    # ----------------------------------------------
     # SIN VENTAS
-    # ==================================================
+    # ----------------------------------------------
 
     st.subheader(
         "⚪ Productos sin ventas registradas"
-    )
-
-
-    st.caption(
-        "Estos productos están actualmente en inventario, "
-        "pero no registraron ventas en el histórico disponible."
     )
 
 
@@ -590,7 +605,7 @@ La decisión final también puede depender del precio, proveedor, mercado, compe
         (
             resumen["Stock_Actual"] > 0
         )
-    ].copy()
+    ]
 
 
     st.dataframe(
@@ -623,9 +638,9 @@ else:
     )
 
 
-    # ==================================================
+    # ----------------------------------------------
     # BUSCADOR
-    # ==================================================
+    # ----------------------------------------------
 
     texto_busqueda = st.text_input(
         "🔍 Buscar producto",
@@ -651,8 +666,7 @@ else:
 
             producto
 
-            for producto
-            in productos_actuales
+            for producto in productos_actuales
 
             if texto_busqueda.lower()
             in producto.lower()
@@ -675,19 +689,11 @@ else:
         st.stop()
 
 
-    # ==================================================
-    # SELECTOR
-    # ==================================================
-
     producto_elegido = st.selectbox(
         "Selecciona un producto",
         productos_filtrados,
     )
 
-
-    # ==================================================
-    # RESUMEN DEL PRODUCTO
-    # ==================================================
 
     fila_resumen = resumen[
         resumen["Producto"]
@@ -701,10 +707,6 @@ else:
         ]
     )
 
-
-    # ==================================================
-    # HISTORIAL
-    # ==================================================
 
     datos_producto = df_propio[
         df_propio["Producto_Analitico"]
@@ -723,205 +725,472 @@ else:
     )
 
 
-    categoria = (
-        fila_resumen["Categoria"]
-    )
-
-
-    marca = (
-        fila_resumen["Marca"]
-    )
-
+    categoria = fila_resumen["Categoria"]
+    marca = fila_resumen["Marca"]
 
     st.caption(
         f"{categoria} | {marca}"
     )
 
 
-    ventas_totales = (
-        fila_resumen["Ventas_Totales"]
+    # ==================================================
+    # HISTÓRICO MENSUAL
+    # ==================================================
+
+    ventas_mensuales = (
+
+        datos_producto
+
+        .groupby("Mes_Fecha")
+
+        .agg(
+            Vendido_Mes=(
+                "Vendido_Mes",
+                "sum"
+            )
+        )
+
+        .reset_index()
+
     )
 
 
-    promedio_mensual = (
-        fila_resumen["Promedio_Mensual"]
-    )
+    # Meses completos anteriores al inventario actual.
+    meses_completos = ventas_mensuales[
+        ventas_mensuales["Mes_Fecha"]
+        < ultimo_mes
+    ]
 
 
-    stock_actual = (
-        fila_resumen["Stock_Actual"]
-    )
-
-
-    cobertura = (
-        fila_resumen["Cobertura_Meses"]
-    )
-
-
-    precio_usd = (
-        fila_resumen["Precio_USD"]
-    )
-
-
-    tc_actual = (
-        fila_resumen["TC"]
-    )
-
-
-    recomendacion = (
-        fila_resumen["Estado"]
+    ventas_mes_actual = (
+        ventas_mensuales.loc[
+            ventas_mensuales["Mes_Fecha"]
+            == ultimo_mes,
+            "Vendido_Mes"
+        ]
+        .sum()
     )
 
 
     # ==================================================
-    # MÉTRICAS
+    # PROMEDIO HISTÓRICO
     # ==================================================
 
-    col1, col2, col3, col4 = (
+    if len(meses_completos) > 0:
+
+        promedio_historico = (
+            meses_completos["Vendido_Mes"]
+            .mean()
+        )
+
+    else:
+
+        promedio_historico = 0
+
+
+    # ==================================================
+    # PROYECCIÓN DEL MES ACTUAL
+    # ==================================================
+
+    if (
+        dia_corte > 0
+        and ventas_mes_actual > 0
+    ):
+
+        proyeccion_mes_actual = (
+            ventas_mes_actual
+            / dia_corte
+            * dias_mes
+        )
+
+    else:
+
+        proyeccion_mes_actual = 0
+
+
+    # Si no existe histórico porque el producto es nuevo,
+    # usamos la proyección actual como referencia.
+    if promedio_historico > 0:
+
+        demanda_base = promedio_historico
+
+    else:
+
+        demanda_base = proyeccion_mes_actual
+
+
+    tipo_demanda = clasificar_demanda(
+        demanda_base,
+        umbral_alta,
+        umbral_media
+    )
+
+
+    # ==================================================
+    # DATOS ACTUALES
+    # ==================================================
+
+    stock_actual = fila_resumen["Stock_Actual"]
+
+    precio_usd = fila_resumen["Precio_USD"]
+
+    tc_actual = fila_resumen["TC"]
+
+
+    # ==================================================
+    # COBERTURA
+    # ==================================================
+
+    if demanda_base > 0:
+
+        cobertura = (
+            stock_actual
+            / demanda_base
+        )
+
+    else:
+
+        cobertura = None
+
+
+    # ==================================================
+    # DEMANDA RESTANTE DEL MES
+    # ==================================================
+
+    demanda_diaria_historica = (
+        demanda_base / dias_mes
+        if demanda_base > 0
+        else 0
+    )
+
+
+    demanda_restante_base = (
+        demanda_diaria_historica
+        * dias_restantes
+    )
+
+
+    demanda_restante_ritmo_actual = 0
+
+    if dia_corte > 0:
+
+        ritmo_diario_actual = (
+            ventas_mes_actual
+            / dia_corte
+        )
+
+        demanda_restante_ritmo_actual = (
+            ritmo_diario_actual
+            * dias_restantes
+        )
+
+
+    # Opcional: cubrir también el próximo mes.
+    demanda_objetivo = (
+        demanda_restante_base
+    )
+
+
+    if incluir_mes_siguiente:
+
+        demanda_objetivo += (
+            demanda_base
+        )
+
+
+    pedido_base = max(
+        0,
+        math.ceil(
+            demanda_objetivo
+            - stock_actual
+        )
+    )
+
+
+    pedido_ritmo_actual = max(
+        0,
+        math.ceil(
+            demanda_restante_ritmo_actual
+            - stock_actual
+        )
+    )
+
+
+    # ==================================================
+    # DÍAS HASTA STOCK MÍNIMO
+    # ==================================================
+
+    dias_hasta_minimo = None
+
+
+    if (
+        demanda_diaria_historica > 0
+        and stock_actual > stock_minimo_alta
+    ):
+
+        dias_hasta_minimo = (
+            stock_actual
+            - stock_minimo_alta
+        ) / demanda_diaria_historica
+
+
+    # ==================================================
+    # DECISIÓN SEGÚN POLÍTICA
+    # ==================================================
+
+    if tipo_demanda == "⚪ SIN MOVIMIENTO":
+
+        accion = (
+            "⚪ NO REPONER"
+        )
+
+
+    elif tipo_demanda == "🐢 BAJA DEMANDA":
+
+        accion = (
+            "🐢 NO REPONER AUTOMÁTICAMENTE"
+        )
+
+
+    elif tipo_demanda == "🔥 ALTA DEMANDA":
+
+        if stock_actual <= stock_minimo_alta:
+
+            accion = (
+                "🔴 HACER PEDIDO"
+            )
+
+        elif (
+            dias_hasta_minimo is not None
+            and dias_hasta_minimo <= dias_alerta
+        ):
+
+            accion = (
+                "🟠 PREPARAR PEDIDO"
+            )
+
+        else:
+
+            accion = (
+                "🟡 VIGILAR"
+            )
+
+
+    else:
+
+        if pedido_base > 0:
+
+            accion = (
+                "🟠 REVISAR REPOSICIÓN"
+            )
+
+        else:
+
+            accion = (
+                "🟢 STOCK SUFICIENTE"
+            )
+
+
+    # ==================================================
+    # MÉTRICAS PRINCIPALES
+    # ==================================================
+
+    c1, c2, c3, c4 = (
         st.columns(4)
     )
 
 
-    col1.metric(
+    c1.metric(
         "Stock actual",
         f"{stock_actual:.0f}"
     )
 
 
-    col2.metric(
-        "Ventas registradas",
-        f"{ventas_totales:.0f}"
+    c2.metric(
+        "Ventas este mes",
+        f"{ventas_mes_actual:.0f}"
     )
 
 
-    col3.metric(
-        "Venta promedio mensual",
-        f"{promedio_mensual:.2f}"
+    c3.metric(
+        "Promedio meses completos",
+        f"{promedio_historico:.2f}"
     )
 
 
-    if pd.notna(cobertura):
+    if cobertura is not None:
 
-        col4.metric(
-            "Cobertura estimada",
+        c4.metric(
+            "Cobertura aproximada",
             f"{cobertura:.2f} meses"
         )
 
     else:
 
-        col4.metric(
-            "Cobertura estimada",
+        c4.metric(
+            "Cobertura aproximada",
             "Sin datos"
         )
 
 
     # ==================================================
-    # RECOMENDACIÓN
+    # CLASIFICACIÓN
     # ==================================================
 
     st.subheader(
-        "📊 Estado del inventario"
+        "📈 Nivel de demanda"
     )
 
 
-    if recomendacion.startswith("🔴"):
+    st.info(
+        tipo_demanda
+    )
 
-        st.error(
-            recomendacion
-        )
 
-    elif recomendacion.startswith("🟠"):
+    st.write(
+        f"El análisis utiliza como referencia "
+        f"**{demanda_base:.2f} unidades por mes**."
+    )
 
-        st.warning(
-            recomendacion
-        )
 
-    elif recomendacion.startswith("🟡"):
+    # ==================================================
+    # POLÍTICA REAL DE REPOSICIÓN
+    # ==================================================
 
-        st.warning(
-            recomendacion
-        )
+    st.subheader(
+        "🛒 Decisión de reposición"
+    )
 
-    elif recomendacion.startswith("🟢"):
 
-        st.success(
-            recomendacion
-        )
+    if accion.startswith("🔴"):
+
+        st.error(accion)
+
+    elif accion.startswith("🟠"):
+
+        st.warning(accion)
+
+    elif accion.startswith("🟢"):
+
+        st.success(accion)
 
     else:
 
-        st.info(
-            recomendacion
-        )
+        st.info(accion)
 
 
-    # ==================================================
-    # EXPLICACIÓN INDIVIDUAL
-    # ==================================================
-
-    if promedio_mensual > 0:
+    if tipo_demanda == "🔥 ALTA DEMANDA":
 
         st.write(
-            f"Este producto vende aproximadamente "
-            f"**{promedio_mensual:.2f} unidades por mes** "
-            f"y actualmente quedan **{stock_actual:.0f} unidades**."
+            f"Para productos de alta demanda, "
+            f"el stock mínimo configurado es de "
+            f"**{stock_minimo_alta} unidades**."
         )
 
 
-        if pd.notna(cobertura):
+        if dias_hasta_minimo is not None:
 
             st.write(
-                f"Al ritmo registrado, el stock podría cubrir "
-                f"aproximadamente **{cobertura:.2f} meses**."
+                f"Al ritmo histórico podría llegar "
+                f"a ese mínimo en aproximadamente "
+                f"**{dias_hasta_minimo:.1f} días**."
             )
 
-    else:
 
-        st.write(
-            "No se registraron ventas de este producto "
-            "durante el periodo disponible."
-        )
+    # ==================================================
+    # SUGERENCIA DE CANTIDAD
+    # ==================================================
+
+    st.subheader(
+        "📦 Cantidad sugerida"
+    )
+
+
+    horizonte_texto = (
+        "resto del mes y el próximo mes"
+        if incluir_mes_siguiente
+        else "resto del mes"
+    )
+
+
+    c5, c6 = st.columns(2)
+
+
+    c5.metric(
+        f"Pedido base para cubrir {horizonte_texto}",
+        f"{pedido_base} unidades"
+    )
+
+
+    c6.metric(
+        "Escenario si continúa el ritmo actual",
+        f"{pedido_ritmo_actual} unidades"
+    )
+
+
+    st.caption(
+        "El pedido base utiliza el comportamiento histórico. "
+        "El segundo escenario utiliza el ritmo de ventas del mes actual "
+        "y puede ser mucho más agresivo. "
+        "Debe utilizarse como alerta, no como compra automática."
+    )
+
+
+    # ==================================================
+    # PROYECCIÓN DEL MES ACTUAL
+    # ==================================================
+
+    st.subheader(
+        "📊 Mes actual"
+    )
+
+
+    m1, m2, m3 = st.columns(3)
+
+
+    m1.metric(
+        "Ventas registradas",
+        f"{ventas_mes_actual:.0f}"
+    )
+
+
+    m2.metric(
+        "Días transcurridos",
+        f"{dia_corte}"
+    )
+
+
+    m3.metric(
+        "Proyección al cierre",
+        f"{proyeccion_mes_actual:.1f}"
+    )
 
 
     # ==================================================
     # PRECIO
     # ==================================================
 
-    col5, col6 = st.columns(2)
+    p1, p2 = st.columns(2)
 
 
     if pd.notna(precio_usd):
 
-        col5.metric(
+        p1.metric(
             "Precio USD actual",
             f"${precio_usd:.2f}"
-        )
-
-    else:
-
-        col5.metric(
-            "Precio USD actual",
-            "Sin dato"
         )
 
 
     if pd.notna(tc_actual):
 
-        col6.metric(
+        p2.metric(
             "Tipo de cambio",
             f"{tc_actual:.2f}"
         )
 
-    else:
-
-        col6.metric(
-            "Tipo de cambio",
-            "Sin dato"
-        )
-
 
     # ==================================================
-    # HISTORIAL DE VENTAS
+    # GRÁFICO
     # ==================================================
 
     st.subheader(
@@ -929,23 +1198,21 @@ else:
     )
 
 
-    ventas_mes = (
+    grafico = ventas_mensuales.copy()
 
-        datos_producto
-
-        .groupby("Mes")[
-            "Vendido_Mes"
-        ]
-
-        .sum()
-
-        .reset_index()
-
+    grafico["Mes"] = (
+        grafico["Mes_Fecha"]
+        .dt.strftime("%Y-%m")
     )
 
 
     grafico = (
-        ventas_mes
+        grafico[
+            [
+                "Mes",
+                "Vendido_Mes"
+            ]
+        ]
         .set_index("Mes")
     )
 
@@ -956,7 +1223,7 @@ else:
 
 
     # ==================================================
-    # HISTORIAL COMPLETO
+    # TABLA HISTÓRICA
     # ==================================================
 
     st.subheader(
